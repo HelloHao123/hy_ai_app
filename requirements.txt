@@ -5,3 +5,5 @@ plotly
 streamlit-antd-components
 SQLAlchemy
 pymysql
+xlsxwriter
+openpyxl
