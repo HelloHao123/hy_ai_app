@@ -21,8 +21,8 @@ import client_manager_st # 导入我们刚才创建的客户管理模块
 st.set_page_config(page_title="数字贸易AI平台", layout="wide", page_icon="🖥️")
 
 # --- 【修改 1：环境代理配置】 ---
-os.environ['http_proxy'] = 'http://127.00.1:7890'
-os.environ['https_proxy'] = 'http://127.0.0.1:7890'
+# os.environ['http_proxy'] = 'http://127.00.1:7890'
+# os.environ['https_proxy'] = 'http://127.0.0.1:7890'
 
 # 初始化 Session State
 if 'authenticated' not in st.session_state:
