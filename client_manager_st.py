@@ -24,6 +24,7 @@ Base = st.session_state['sqlalchemy_base']
 
 class Client(Base):
     __tablename__ = 'clients'
+    __table_args__ = {'extend_existing': True}  # 👈 就是加了这一行！允许Streamlit重复加载它
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     no = Column(String(50), unique=True, nullable=False)
