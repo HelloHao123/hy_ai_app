@@ -2,50 +2,31 @@ import streamlit as st
 import requests
 import time
 import re
-import random
-import base64
 
 # =================[ 1. 核心配置：从 Secrets 读取 API 密钥 ]=============
-# 从 secrets 获取 ImgBB Key
-IMGBB_API_KEY = st.secrets["IMGBB_API_KEY"]
+try:
+    IMGBB_API_KEY = st.secrets["IMGBB_API_KEY"]
+    API_KEY = st.secrets["GRS_API_KEY"]
+except KeyError as e:
+    st.error(f"缺少必要的 API Key: {e}，请在 Streamlit Secrets 中配置。")
+    st.stop()
 
 # 绘图 API 配置
 API_HOST = "https://grsaiapi.com" 
-API_KEY = st.secrets["GRS_API_KEY"]
 
 # =================[ 2. 图片中转站：上传至 ImgBB ]=================
 def upload_image_to_imgbb(image_file):
-    """
-    根据 ImgBB API v1 规范上传图片
-    image_file: Streamlit 上传的文件对象
-    返回: 图片直链 URL
-    """
     if image_file is None:
         return None
-    
     url = "https://api.imgbb.com/1/upload"
-    
-    # 准备参数
-    # expiration=600 表示图片在 10 分钟后自动删除，保护隐私且节省空间
-    params = {
-        "key": IMGBB_API_KEY,
-        "expiration": 600 
-    }
-    
-    # 准备文件
-    files = {
-        "image": image_file.getvalue()
-    }
+    params = {"key": IMGBB_API_KEY, "expiration": 600}
+    files = {"image": image_file.getvalue()}
 
     try:
-        # 使用 POST 方法上传
         response = requests.post(url, params=params, files=files, timeout=30)
         res_data = response.json()
-        
         if res_data.get("success"):
-            # 提取 API 返回的图片直链
-            direct_url = res_data["data"]["url"]
-            return direct_url
+            return res_data["data"]["url"]
         else:
             st.error(f"ImgBB 上传失败: {res_data.get('message', '未知错误')}")
             return None
@@ -59,12 +40,10 @@ def refine_prompt_stable(gemini_model, config_dict):
         refine_query = f"""
         Directly act as a professional Plush Toy Industrial Designer.
         Convert input into a structured AI drawing prompt.
-        
         Subject: {config_dict['subject']}, Expression: {config_dict['expression']} pose.
         Fabric: {config_dict['material']} texture, visible fibers.
         Accessories: {config_dict['accessories']}.
         Environment: {config_dict['background']}, {config_dict['style']}.
-        
         Output Format:
         [EN]: (Detailed English prompt for AI drawing)
         [ZH]: (Brief Chinese design highlights)
@@ -75,13 +54,10 @@ def refine_prompt_stable(gemini_model, config_dict):
         zh_desc = re.search(r'\[ZH\]:(.*)', text, re.DOTALL).group(1).strip()
         return en_prompt, zh_desc
     except:
-        return f"A high-quality plush toy, soft texture", "基础设计方案"
+        return f"A high-quality plush toy, soft texture, {config_dict['subject']}, {config_dict['material']}", "基础设计方案"
 
-# =================[ 4. 绘图 API 逻辑 (支持 urls 参数) ]=================
+# =================[ 4. 绘图 API 逻辑 (优化升级版) ]=================
 def submit_draw_task(prompt, ref_urls=None):
-    """
-    提交任务，支持可选的参考图链接列表
-    """
     url = f"{API_HOST}/v1/draw/completions"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"}
     
@@ -93,21 +69,40 @@ def submit_draw_task(prompt, ref_urls=None):
         "shutProgress": True 
     }
     
-    # 如果有参考图链接，加入 urls 参数
     if ref_urls:
         payload["urls"] = ref_urls
 
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=15)
+        
+        # 【拦截器 1】检查是不是网络级别报错 (如 401 没权限, 400 参数错误)
+        if response.status_code != 200:
+            st.error(f"🚫 接口 HTTP 报错: [{response.status_code}] {response.text}")
+            return None
+            
         res_data = response.json()
-        if res_data.get("code") == 0:
-            return res_data["data"]["id"]
+        
+        # 【拦截器 2】有的 API 成功是返回 1 或 200，而不是 0，做全面兼容
+        code = res_data.get("code")
+        if code in [0, 1, 200, "0", "1", "200"]:
+            # 兼容不同的数据层级格式
+            task_id = None
+            if "data" in res_data and isinstance(res_data["data"], dict):
+                task_id = res_data["data"].get("id") or res_data["data"].get("taskId")
+            elif "result" in res_data:
+                task_id = res_data.get("result")
+            
+            if task_id:
+                return str(task_id)
+        
+        # 【最重要的一步】如果上面的判断全没通过，直接把 API 骂你的话打在屏幕上！
+        st.error(f"⚠️ 绘图平台拒绝了任务，详情: {res_data}")
         return None
-    except:
+    except Exception as e:
+        st.error(f"🔌 请求发生代码层面异常: {e}")
         return None
 
 def fetch_draw_result(task_id):
-    """带进度反馈的轮询获取结果"""
     url = f"{API_HOST}/v1/draw/result"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"}
     p_bar = st.progress(0)
@@ -115,43 +110,62 @@ def fetch_draw_result(task_id):
     
     for i in range(80):
         try:
-            res = requests.post(url, json={"id": task_id}, headers=headers, timeout=10).json()
-            if res.get("code") == 0:
-                data = res["data"]
-                status, progress = data.get("status"), data.get("progress", 0)
+            response = requests.post(url, json={"id": task_id}, headers=headers, timeout=10)
+            res_data = response.json()
+            
+            code = res_data.get("code")
+            if code in [0, 1, 200, "0", "1", "200"]:
+                data = res_data.get("data", {})
+                if not data and "status" in res_data: # 兼容变种数据格式
+                    data = res_data
+                    
+                status = data.get("status")
+                progress = data.get("progress", 0)
                 
-                # 心理安抚描述
                 if progress < 20: msg = "🧶 正在解析参考图像结构..."
                 elif progress < 50: msg = "🧵 正在进行虚拟缝合与布料铺设..."
                 elif progress < 80: msg = "✨ 正在渲染细节纹理与环境光影..."
                 else: msg = "📦 正在生成最终设计方案..."
                 
-                p_bar.progress(progress / 100)
-                p_text.markdown(f"**{msg} ({progress}%)**")
+                safe_progress = min(int(progress), 100)
+                p_bar.progress(safe_progress / 100)
+                p_text.markdown(f"**{msg} ({safe_progress}%)**")
                 
-                if status == "succeeded":
+                if status in ["succeeded", "SUCCESS"]:
                     p_bar.empty(); p_text.empty()
-                    return data["results"][0]["url"]
-                if status == "failed":
+                    # 兼容不同位置的 URL
+                    if "results" in data and len(data["results"]) > 0:
+                        return data["results"][0]["url"]
+                    elif "url" in data:
+                        return data["url"]
+                    elif "imageUrl" in data:
+                        return data["imageUrl"]
+                        
+                if status in ["failed", "FAILED"]:
                     p_bar.empty(); p_text.empty()
-                    st.error(f"绘图失败: {data.get('failure_reason')}")
+                    st.error(f"💥 绘图中断，API提示: {data.get('failure_reason', data)}")
                     return None
+            else:
+                st.error(f"⚠️ 获取进度报错: {res_data}")
+                return None
             time.sleep(3)
-        except:
+        except Exception as e:
             time.sleep(2)
-    p_bar.empty(); p_text.error("轮询超时"); return None
+            
+    p_bar.empty()
+    p_text.error("⏳ 轮询超时，第三方服务器生成太慢了")
+    return None
 
 # =================[ 5. 主渲染函数 ]=================
 def render_toy_generator(gemini_model):
     st.markdown("<h2 style='color: #F8FAFC;'>🧸 AI 毛绒玩具专业设计室 </h2>", unsafe_allow_html=True)
     
     if "toy_generated_images" not in st.session_state:
-        st.session_state.toy_generated_images = []
+        st.session_state.toy_generated_images =[]
 
     # --- UI 输入区 ---
     with st.container(border=True):
         st.subheader("🖼️ 图片参考 (可选)")
-        # 允许用户上传图片
         uploaded_file = st.file_uploader("上传一张参考图片或手绘草图", type=["png", "jpg", "jpeg"])
         if uploaded_file:
             st.image(uploaded_file, caption="已上传参考图", width=250)
@@ -174,7 +188,6 @@ def render_toy_generator(gemini_model):
         }
 
         with st.status("🏗️ 设计流水线运行中...", expanded=True) as status:
-            # 1. 如果用户上传了图，先处理中转上传
             ref_urls = None
             if uploaded_file:
                 st.write("📤 正在将参考图同步至云端加速引擎...")
@@ -185,33 +198,32 @@ def render_toy_generator(gemini_model):
                 else:
                     st.warning("⚠️ 图片中转失败，将切换为纯文生图模式。")
 
-            # 2. Gemini 构思提示词
             st.write("🧠 行业专家正在构思设计指令...")
             en_prompt, zh_desc = refine_prompt_stable(gemini_model, config_dict)
             
-            # 3. 提交绘图任务
             st.write("🖌️ 正在启动绘图引擎进行设计建模...")
             task_id = submit_draw_task(en_prompt, ref_urls=ref_urls)
             
             if task_id:
                 final_img_url = fetch_draw_result(task_id)
                 if final_img_url:
-                    # 下载成品图片字节流
-                    img_data = requests.get(final_img_url, timeout=30).content
-                    
-                    # 存入结果
-                    st.session_state.toy_generated_images.append({
-                        "content": img_data,
-                        "filename": f"Plush_{int(time.time())}.png",
-                        "en_prompt": en_prompt,
-                        "zh_desc": zh_desc,
-                        "is_i2i": True if ref_urls else False
-                    })
-                    status.update(label="✅ 设计生成成功！", state="complete")
+                    try:
+                        img_data = requests.get(final_img_url, timeout=30).content
+                        st.session_state.toy_generated_images.append({
+                            "content": img_data,
+                            "filename": f"Plush_{int(time.time())}.png",
+                            "en_prompt": en_prompt,
+                            "zh_desc": zh_desc,
+                            "is_i2i": True if ref_urls else False
+                        })
+                        status.update(label="✅ 设计生成成功！", state="complete")
+                    except Exception as e:
+                        st.error(f"📥 下载生成好的图片失败: {e}")
+                        status.update(label="❌ 任务失败", state="error")
                 else:
-                    st.error("获取结果超时。")
+                    status.update(label="❌ 任务失败", state="error")
             else:
-                st.error("任务提交失败。")
+                status.update(label="❌ 任务失败", state="error")
 
     # =================[ 陈列馆展示 ]=================
     if st.session_state.toy_generated_images:
