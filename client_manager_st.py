@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import uuid # 用于生成唯一文件名
+import io # 👈 【新增】用于在内存中生成文件，极速导出
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, Integer, String, Text
@@ -24,7 +25,7 @@ Base = st.session_state['sqlalchemy_base']
 
 class Client(Base):
     __tablename__ = 'clients'
-    __table_args__ = {'extend_existing': True}  # 👈 就是加了这一行！允许Streamlit重复加载它
+    __table_args__ = {'extend_existing': True}
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     no = Column(String(50), unique=True, nullable=False)
@@ -44,7 +45,6 @@ class Client(Base):
 @st.cache_resource
 def init_db():
     Base.metadata.create_all(engine)
-    # 这里去掉 success 提示，避免每次刷新页面都弹出，改为静默创建
 
 def get_clients():
     session = Session()
@@ -67,7 +67,6 @@ def add_client_to_db(client_data):
 
 # --- 批量导入函数 (优化版) ---
 def import_clients_from_df(df_to_import):
-    # 【优化1】清洗列名：去除所有列名首尾的不可见空格
     df_to_import.columns = [col.strip() for col in df_to_import.columns]
     
     session = Session()
@@ -75,12 +74,10 @@ def import_clients_from_df(df_to_import):
     skipped_count = 0
     errors = []
 
-    # 定义必填字段
     required_cols = ['No.', 'Clients Name', 'Company']
     
     for index, row in df_to_import.iterrows():
         try:
-            # 【优化2】检查必填字段是否存在且不为空
             missing_fields = [col for col in required_cols if col not in df_to_import.columns or pd.isna(row.get(col))]
             if missing_fields:
                 errors.append(f"第 {index+2} 行缺少必填项 {missing_fields}，跳过。")
@@ -89,7 +86,6 @@ def import_clients_from_df(df_to_import):
 
             client_no = str(row['No.']).strip()
 
-            # 检查 No. 是否已存在
             existing_client = session.query(Client).filter_by(no=client_no).first()
             if existing_client:
                 errors.append(f"客户编号 {client_no} 已存在，跳过第 {index+2} 行。")
@@ -155,10 +151,8 @@ def render_client_manager():
             if st.button("开始导入", key="start_import_button"):
                 try:
                     df_to_import = pd.read_excel(uploaded_excel_file)
-                    # 执行导入
                     imported, skipped, errs = import_clients_from_df(df_to_import)
                     
-                    # 【优化3】将结果存入 session_state，这样 st.rerun() 之后依然能看到
                     st.session_state['import_result'] = {
                         'imported': imported,
                         'skipped': skipped,
@@ -169,14 +163,13 @@ def render_client_manager():
                 except Exception as e:
                     st.error(f"处理 Excel 文件失败: {e}")
 
-        # 【优化4】在页面刷新后，检查并显示导入结果
         if 'import_result' in st.session_state:
             res = st.session_state['import_result']
             if res['imported'] > 0:
                 st.success(f"✅ 成功导入 {res['imported']} 条客户数据！")
             if res['skipped'] > 0:
                 st.warning(f"⚠️ 跳过 {res['skipped']} 条数据。")
-                for error in res['errors'][:5]: # 最多显示5条错误，防止刷屏
+                for error in res['errors'][:5]:
                     st.error(error)
             
             if res['imported'] == 0 and res['skipped'] == 0:
@@ -187,7 +180,6 @@ def render_client_manager():
                 st.code(res['columns'])
                 st.write("请确保 Excel 表头包含：`No.`, `Clients Name`, `Company` (注意大小写和标点)")
             
-            # 显示完后立即删除，防止下次刷新再次出现
             del st.session_state['import_result']
 
         st.markdown("---")
@@ -195,7 +187,7 @@ def render_client_manager():
 
         clients = get_clients()
         if clients:
-            data = []
+            data =[]
             for client in clients:
                 data_row = {
                     'No.': client.no,
@@ -234,21 +226,41 @@ def render_client_manager():
             else:
                 st.info("没有可供预览的名片。")
 
-            # 导出 Excel 功能
+            # ================= [导出数据功能 (优化版)] =================
             st.markdown("---")
-            if st.button("导出客户信息到Excel", key="export_button"):
-                excel_file_path = "client_list.xlsx"
-                # 注意：确保安装了 xlsxwriter: pip install xlsxwriter
-                df.to_excel(excel_file_path, index=False, engine='xlsxwriter')
-                with open(excel_file_path, "rb") as file:
-                    st.download_button(
-                        label="点击下载 Excel 文件",
-                        data=file,
-                        file_name="client_list.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_excel_button"
-                    )
-                os.remove(excel_file_path)
+            st.subheader("📥 数据备份与导出")
+            
+            col_ex1, col_ex2 = st.columns(2)
+            
+            # 1. 导出为 Excel 格式（利用 io.BytesIO 在内存中生成）
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='客户列表')
+            
+            with col_ex1:
+                st.download_button(
+                    label="📊 下载为 Excel 文件 (.xlsx)",
+                    data=buffer.getvalue(),
+                    file_name="客户信息备份.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    type="primary",
+                    key="download_excel_mem"
+                )
+            
+            # 2. 导出为 CSV 格式
+            csv_data = df.to_csv(index=False).encode('utf-8-sig')
+            with col_ex2:
+                st.download_button(
+                    label="📑 下载为 CSV 文件 (.csv)",
+                    data=csv_data,
+                    file_name="客户信息备份.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="download_csv_mem"
+                )
+            # =========================================================
+
         else:
             st.info("目前没有客户信息，请上传 Excel 导入，或切换到 '添加新客户' 选项卡进行添加。")
 
@@ -265,7 +277,6 @@ def render_client_manager():
                 nationality_city = st.text_input("国籍/城市", key="add_nationality_city")
             with col2:
                 company = st.text_input("公司名称", key="add_company")
-                # 动态显示公司背景
                 if company:
                     company_bg = get_company_background(company)
                     st.text_area("公司背景信息", value=company_bg, height=100, disabled=True, key="company_bg_display")
