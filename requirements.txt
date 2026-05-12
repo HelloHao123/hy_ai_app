@@ -4,3 +4,4 @@ pandas
 plotly
 streamlit-antd-components
 SQLAlchemy
+pymysql
