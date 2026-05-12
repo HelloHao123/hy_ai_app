@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, Integer, String, Text
 
 # --- 1. 数据库配置和模型定义 ---
-DATABASE_URI = 'mysql+pymysql://root:123456@localhost:3306/client_tracker?charset=utf8mb4'
+DATABASE_URI = "sqlite:///clients.db"
 
 # --- 2. Streamlit Session State 管理 SQLAlchemy 实例 ---
 if 'sqlalchemy_engine' not in st.session_state:
