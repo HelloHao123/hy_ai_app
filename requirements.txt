@@ -7,3 +7,6 @@ SQLAlchemy
 pymysql
 xlsxwriter
 openpyxl
+streamlit-lottie
+streamlit-echarts
+requests
